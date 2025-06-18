@@ -10,6 +10,15 @@ import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { Textarea } from "@/components/ui/textarea";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Loader2 } from "lucide-react";
+
+// Define the speaker utterance interface
+interface SpeakerUtterance {
+  speaker: string;
+  text: string;
+  start: number;
+  end: number;
+}
 
 // Mock data for recent sessions
 const recentSessions = [
@@ -39,28 +48,73 @@ const recentSessions = [
   }
 ];
 
+// Helper function to format time in MM:SS format
+function formatTime(seconds: number): string {
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = Math.floor(seconds % 60);
+  return `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
+}
+
 export function DashboardContent() {
   const setActiveTab = useState("record")[1];
   const [transcription, setTranscription] = useState("");
+  const [utterances, setUtterances] = useState<SpeakerUtterance[]>([]);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [sessionNotes, setSessionNotes] = useState("");
+  const [transcriptionError, setTranscriptionError] = useState("");
+  const [viewMode, setViewMode] = useState<"full" | "diarized">("diarized");
   
   const { status, startRecording, stopRecording, mediaBlobUrl } = useReactMediaRecorder({
     audio: true,
     video: false,
     onStop: (blobUrl) => {
       console.log("Recording stopped: ", blobUrl);
-      // In a real app, we would send this blob to a transcription service
     }
   });
 
-  const handleTranscribe = () => {
-    // Simulate transcription process
-    setIsTranscribing(true);
-    setTimeout(() => {
-      setTranscription("Patient reports feeling better after last session. Range of motion has improved by approximately 15 degrees. Pain level reduced from 7/10 to 4/10. Recommended continuing with current exercise regimen with slight increase in resistance.");
+  const handleTranscribe = async () => {
+    if (!mediaBlobUrl) {
+      setTranscriptionError("No recording found. Please record audio first.");
+      return;
+    }
+    
+    try {
+      setIsTranscribing(true);
+      setTranscriptionError("");
+      setUtterances([]);
+      
+      // Fetch the audio blob from the blob URL
+      const response = await fetch(mediaBlobUrl);
+      const audioBlob = await response.blob();
+      
+      // Create a FormData object and append the audio blob
+      const formData = new FormData();
+      formData.append('audio', audioBlob, 'recording.webm');
+      
+      // Send the audio to our API endpoint for transcription
+      const transcriptionResponse = await fetch('/api/transcribe', {
+        method: 'POST',
+        body: formData,
+      });
+      
+      if (!transcriptionResponse.ok) {
+        const errorData = await transcriptionResponse.json();
+        throw new Error(errorData.error || 'Failed to transcribe audio');
+      }
+      
+      const data = await transcriptionResponse.json();
+      setTranscription(data.transcript);
+      
+      // Set the speaker utterances if available
+      if (data.utterances && data.utterances.length > 0) {
+        setUtterances(data.utterances);
+      }
+    } catch (error) {
+      console.error('Transcription error:', error);
+      setTranscriptionError(error instanceof Error ? error.message : 'An unknown error occurred');
+    } finally {
       setIsTranscribing(false);
-    }, 2000);
+    }
   };
 
   const handleSaveSession = () => {
@@ -103,14 +157,18 @@ export function DashboardContent() {
               <div className="mt-4">
                 <p className="text-sm text-muted-foreground mb-2">Recording Preview:</p>
                 <audio src={mediaBlobUrl} controls className="w-full" />
-                <Button 
-                  variant="outline" 
-                  className="mt-2" 
-                  onClick={handleTranscribe}
-                  disabled={isTranscribing}
-                >
-                  {isTranscribing ? "Transcribing..." : "Transcribe Recording"}
-                </Button>
+                <div className="mt-4 flex items-center space-x-4">
+                  <Button onClick={handleTranscribe} disabled={isTranscribing}>
+                    {isTranscribing ? (
+                      <>
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        Transcribing...
+                      </>
+                    ) : (
+                      "Transcribe with Deepgram Nova 3"
+                    )}
+                  </Button>
+                </div>
                 {isTranscribing && (
                   <Progress value={45} className="mt-2" />
                 )}
@@ -119,24 +177,75 @@ export function DashboardContent() {
             
             {transcription && (
               <div className="mt-4">
-                <p className="text-sm font-medium mb-2">Transcription:</p>
+                {transcriptionError && (
+                  <p className="mt-2 text-sm text-red-500">{transcriptionError}</p>
+                )}
+                <div className="flex items-center justify-between mb-2">
+                  <p className="text-sm font-medium">Transcription:</p>
+                  <div className="flex items-center space-x-2">
+                    <Button 
+                      variant={viewMode === "full" ? "default" : "outline"} 
+                      size="sm" 
+                      onClick={() => setViewMode("full")}
+                    >
+                      Full Text
+                    </Button>
+                    <Button 
+                      variant={viewMode === "diarized" ? "default" : "outline"} 
+                      size="sm" 
+                      onClick={() => setViewMode("diarized")}
+                    >
+                      Speaker Labels
+                    </Button>
+                  </div>
+                </div>
+                
                 <Card className="bg-muted">
                   <CardContent className="pt-4">
-                    <p>{transcription}</p>
+                    {viewMode === "full" ? (
+                      <p>{transcription}</p>
+                    ) : utterances.length > 0 ? (
+                      <div className="space-y-4">
+                        {utterances.map((utterance, index) => (
+                          <div key={index} className="flex">
+                            <div className="flex-shrink-0 mr-3">
+                              <Avatar>
+                                <AvatarFallback className={utterance.speaker.includes('A') ? 'bg-blue-500' : 'bg-green-500'}>
+                                  {utterance.speaker.slice(-1)}
+                                </AvatarFallback>
+                              </Avatar>
+                            </div>
+                            <div>
+                              <p className="font-semibold text-sm">{utterance.speaker}</p>
+                              <p>{utterance.text}</p>
+                              <p className="text-xs text-muted-foreground">
+                                {formatTime(utterance.start)} - {formatTime(utterance.end)}
+                              </p>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p>{transcription}</p>
+                    )}
                   </CardContent>
                 </Card>
+                
+                <div className="mt-4">
+                  <h3 className="text-lg font-medium">Session Notes</h3>
+                  <Textarea 
+                    className="mt-2" 
+                    placeholder="Add your notes about this session..."
+                    value={sessionNotes}
+                    onChange={(e) => setSessionNotes(e.target.value)}
+                    rows={6}
+                  />
+                  <Button onClick={handleSaveSession} className="mt-2">
+                    Save Session
+                  </Button>
+                </div>
               </div>
             )}
-            
-            <div className="mt-4">
-              <p className="text-sm font-medium mb-2">Session Notes:</p>
-              <Textarea 
-                placeholder="Add your notes about the session here..." 
-                className="min-h-[150px]"
-                value={sessionNotes}
-                onChange={(e) => setSessionNotes(e.target.value)}
-              />
-            </div>
           </CardContent>
           <CardFooter>
             <Button onClick={handleSaveSession} disabled={!transcription && !sessionNotes}>
